@@ -38,6 +38,10 @@ export function hashPassword(password: string) {
 }
 
 export function readLocalDb() {
+  if (!existsSync(dbPath) && process.env.VERCEL) {
+    return createDefaultLocalDb();
+  }
+
   ensureLocalDb();
   const db = JSON.parse(readFileSync(dbPath, "utf8")) as LocalDatabase;
   db.comments ??= [];
@@ -459,8 +463,12 @@ function ensureLocalDb() {
     return;
   }
 
+  writeLocalDb(createDefaultLocalDb());
+}
+
+function createDefaultLocalDb(): LocalDatabase {
   const now = new Date().toISOString();
-  const db: LocalDatabase = {
+  return {
     users: [
       {
         id: "local-admin",
@@ -489,8 +497,6 @@ function ensureLocalDb() {
     tasks: [],
     comments: []
   };
-
-  writeLocalDb(db);
 }
 
 function toProfile(user: LocalUser): Profile {
