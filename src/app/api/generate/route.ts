@@ -472,12 +472,19 @@ async function persistGeneratedImage({
   let fileBody: ArrayBuffer | Buffer;
 
   if (generated.kind === "url") {
-    const imageResponse = await fetch(generated.value, {
-      signal: AbortSignal.timeout(60000)
-    });
+    let imageResponse: Response;
+    try {
+      imageResponse = await fetch(generated.value, {
+        signal: AbortSignal.timeout(60000)
+      });
+    } catch {
+      return generated.value;
+    }
+
     if (!imageResponse.ok) {
       return generated.value;
     }
+
     fileBody = await imageResponse.arrayBuffer();
   } else {
     fileBody = Buffer.from(generated.value, "base64");
