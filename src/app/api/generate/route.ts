@@ -9,6 +9,8 @@ import { createLocalGeneration, getLocalModelConnection, getLocalProfile } from 
 import { deriveTitle } from "@/lib/utils";
 import { generateOpenAICompatibleImage } from "@/lib/openai-compatible";
 
+export const maxDuration = 300;
+
 type GenerateBody = {
   title?: string;
   prompt?: string;
@@ -48,7 +50,7 @@ export async function POST(request: NextRequest) {
   const prompt = body.prompt?.trim() ?? "";
   const title = body.title?.trim().slice(0, 48) || deriveTitle(prompt);
   const description = body.description?.trim().slice(0, 180) || null;
-  const size = body.size ?? "1024x1024";
+  const size = normalizeOutputSize(body.size ?? "1024x1024");
   const modelId = body.modelId ?? "";
   let referenceImages: NormalizedReferenceImage[];
   try {
@@ -470,7 +472,9 @@ async function persistGeneratedImage({
   let fileBody: ArrayBuffer | Buffer;
 
   if (generated.kind === "url") {
-    const imageResponse = await fetch(generated.value);
+    const imageResponse = await fetch(generated.value, {
+      signal: AbortSignal.timeout(60000)
+    });
     if (!imageResponse.ok) {
       return generated.value;
     }
@@ -493,4 +497,21 @@ async function persistGeneratedImage({
 
   const { data } = service.storage.from("generated-images").getPublicUrl(path);
   return data.publicUrl;
+}
+
+function normalizeOutputSize(size: string) {
+  const match = /^(\d{2,5})x(\d{2,5})$/.exec(size);
+  if (!match) {
+    return "1024x1024";
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return "1024x1024";
+  }
+
+  const maxSide = 3840;
+  const scale = Math.min(1, maxSide / Math.max(width, height));
+  return `${Math.round(width * scale)}x${Math.round(height * scale)}`;
 }

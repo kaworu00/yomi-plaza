@@ -1,4 +1,4 @@
-import { createSupabaseServerClient } from "@/lib/supabase-server";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase-server";
 import { getDemoProfileFromCookie } from "@/lib/demo-auth";
 import { hasSupabaseEnv } from "@/lib/env";
 import { readLocalDb } from "@/lib/local-db";
@@ -202,15 +202,21 @@ export async function getAdminSnapshot() {
   }
 
   const supabase = createSupabaseServerClient();
-  if (!supabase) {
+  const service = createSupabaseServiceClient();
+  if (!supabase || !service) {
     return null;
   }
 
   const [users, providers, models, images] = await Promise.all([
-    supabase.from("profiles").select("*").order("created_at", { ascending: false }),
-    supabase.from("image_providers").select("id,label,base_url,is_active").order("created_at", { ascending: false }),
-    supabase.from("image_models").select("*").order("created_at", { ascending: false }),
-    supabase.from("gallery_images").select("*").order("created_at", { ascending: false })
+    service.from("profiles").select("*").order("created_at", { ascending: false }),
+    service.from("image_providers").select("id,label,base_url,is_active").order("created_at", { ascending: false }),
+    service.from("image_models").select("*").order("created_at", { ascending: false }),
+    service
+      .from("generated_images")
+      .select(
+        "id,title,prompt,description,reference_images,image_url,width,height,created_at,is_featured,is_public,image_models(display_name),profiles(display_name,email,avatar_url,bio)"
+      )
+      .order("created_at", { ascending: false })
   ]);
 
   return {
@@ -218,8 +224,51 @@ export async function getAdminSnapshot() {
     users: (users.data ?? []) as Profile[],
     providers: (providers.data ?? []) as ImageProvider[],
     models: (models.data ?? []) as ImageModel[],
-    images: (images.data ?? []) as GalleryImage[]
+    images: mapAdminImages((images.data ?? []) as unknown as AdminImageRow[])
   };
+}
+
+type AdminImageRow = {
+  id: string;
+  title: string;
+  prompt: string;
+  description: string | null;
+  reference_images: unknown;
+  image_url: string;
+  width: number;
+  height: number;
+  created_at: string;
+  is_featured: boolean;
+  is_public: boolean;
+  image_models: { display_name: string } | { display_name: string }[] | null;
+  profiles:
+    | { display_name: string | null; email: string | null; avatar_url: string | null; bio: string | null }
+    | Array<{ display_name: string | null; email: string | null; avatar_url: string | null; bio: string | null }>
+    | null;
+};
+
+function mapAdminImages(images: AdminImageRow[]) {
+  return images.map((image) => ({
+    id: image.id,
+    title: image.title,
+    prompt: image.prompt,
+    image_url: image.image_url,
+    width: image.width,
+    height: image.height,
+    model_name: normalizeMaybeArray(image.image_models)?.display_name ?? "Unknown model",
+    owner_name: normalizeMaybeArray(image.profiles)?.display_name ?? normalizeMaybeArray(image.profiles)?.email ?? "Creator",
+    owner_avatar_url: normalizeMaybeArray(image.profiles)?.avatar_url ?? null,
+    owner_bio: normalizeMaybeArray(image.profiles)?.bio ?? null,
+    description: image.description ?? null,
+    reference_images: Array.isArray(image.reference_images) ? (image.reference_images as GalleryImage["reference_images"]) : [],
+    created_at: image.created_at,
+    is_featured: image.is_featured,
+    is_public: image.is_public
+  })) satisfies GalleryImage[];
+}
+
+function normalizeMaybeArray<T>(value: T | T[] | null) {
+  return Array.isArray(value) ? value[0] ?? null : value;
 }
 
 function hydrateLocalImage(image: GalleryImage, users: Profile[]) {

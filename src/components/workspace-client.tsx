@@ -34,6 +34,11 @@ type GenerateResponse = {
   error?: string;
 };
 
+type RecentTasksResponse = {
+  tasks?: GenerationTask[];
+  error?: string;
+};
+
 type StudioWorkspace = {
   id: string;
   name: string;
@@ -480,6 +485,7 @@ export function WorkspaceClient({ profile, models, recentTasks, images, isConfig
     event.preventDefault();
     setStatus("loading");
     setMessage("");
+    const startedAt = new Date().toISOString();
 
     const result = await requestJson("/api/generate", {
       method: "POST",
@@ -503,6 +509,44 @@ export function WorkspaceClient({ profile, models, recentTasks, images, isConfig
     });
 
     if (!result.ok) {
+      if (isRecoverableFetchError(result.payload.error)) {
+        setMessage("请求连接中断，但模型可能仍在后台生成。正在尝试找回结果...");
+        const recovered = await recoverLatestGeneration(startedAt);
+
+        if (recovered.status === "succeeded") {
+          setStatus("success");
+          setPendingImageId(recovered.imageId || null);
+          setMessage("生成已完成，结果已自动找回并进入左侧历史。");
+          if (recovered.imageId) {
+            setWorkspaces((current) =>
+              current.map((workspace) =>
+                workspace.id === selectedWorkspaceId
+                  ? {
+                      ...workspace,
+                      lastImageId: recovered.imageId,
+                      imageIds: Array.from(new Set([...workspace.imageIds, recovered.imageId]))
+                    }
+                  : workspace
+              )
+            );
+          }
+          router.refresh();
+          return;
+        }
+
+        if (recovered.status === "failed") {
+          setStatus("error");
+          setMessage(recovered.error ?? "后台任务生成失败，本次不会扣积分。");
+          router.refresh();
+          return;
+        }
+
+        setStatus("error");
+        setMessage("请求连接中断，后台暂未返回结果。请稍后刷新工作台或查看左侧历史。");
+        router.refresh();
+        return;
+      }
+
       setStatus("error");
       setMessage(result.payload.error ?? "生成失败，请稍后再试。");
       return;
@@ -522,6 +566,40 @@ export function WorkspaceClient({ profile, models, recentTasks, images, isConfig
       );
     }
     router.refresh();
+  }
+
+  async function recoverLatestGeneration(startedAt: string) {
+    for (let attempt = 0; attempt < 36; attempt += 1) {
+      if (attempt > 0) {
+        await sleep(5000);
+      }
+
+      const result = await requestJson(`/api/tasks?since=${encodeURIComponent(startedAt)}`, {
+        method: "GET",
+        cache: "no-store"
+      });
+      if (!result.ok) {
+        continue;
+      }
+
+      const payload = result.payload as RecentTasksResponse;
+      const task = payload.tasks?.[0];
+      if (!task) {
+        continue;
+      }
+
+      if (task.status === "succeeded" && task.image_id) {
+        return { status: "succeeded" as const, imageId: task.image_id };
+      }
+
+      if (task.status === "failed") {
+        return { status: "failed" as const, error: task.error_message };
+      }
+
+      setMessage("后台任务仍在生成中，正在等待图片返回...");
+    }
+
+    return { status: "running" as const };
   }
 
   async function deleteImage(image: GalleryImage) {
@@ -1233,7 +1311,11 @@ function buildOutputSize(aspectRatio: string, resolution: string) {
   const aspect = aspectSizes.find((item) => item.label === aspectRatio) ?? aspectSizes[0];
   const resolutionOption = resolutionOptions.find((item) => item.label === resolution) ?? resolutionOptions[0];
   const [width, height] = aspect.baseSize.split("x").map((part) => Number(part));
-  return `${Math.round(width * resolutionOption.scale)}x${Math.round(height * resolutionOption.scale)}`;
+  const scaledWidth = width * resolutionOption.scale;
+  const scaledHeight = height * resolutionOption.scale;
+  const maxSide = 3840;
+  const clampScale = Math.min(1, maxSide / Math.max(scaledWidth, scaledHeight));
+  return `${Math.round(scaledWidth * clampScale)}x${Math.round(scaledHeight * clampScale)}`;
 }
 
 async function requestJson(url: string, init: RequestInit) {
@@ -1248,6 +1330,14 @@ async function requestJson(url: string, init: RequestInit) {
       payload: { error: error instanceof Error ? error.message : "请求失败。" }
     };
   }
+}
+
+function isRecoverableFetchError(message?: string) {
+  return Boolean(message && /failed to fetch|load failed|networkerror|请求失败/i.test(message));
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function parseGeneratePayload(text: string, ok: boolean, status: number): GenerateResponse {
